@@ -1,7 +1,5 @@
-flask
+streamlit
 torch
 torchvision
 pillow
 numpy
-opencv-python-headless
-gunicorn
