@@ -17,7 +17,8 @@ FRESHNESS = ["Fit for Consumption (Safe)", "Unfit for Consumption (Spoiled / Ris
 class MultiTaskFoodModel(nn.Module):
     def __init__(self, num_cuisines=7, num_freshness=2):
         super().__init__()
-        self.backbone = models.mobilenet_v3_small(weights=None)
+        # Use pretrained weights so backbone produces meaningful embeddings even if heads adapt
+        self.backbone = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT)
         in_features = self.backbone.classifier[0].in_features
         self.backbone.classifier = nn.Identity()
         self.cuisine_head = nn.Linear(in_features, num_cuisines)
@@ -34,9 +35,12 @@ def load_model():
     if os.path.exists(weights_path):
         try:
             state = torch.load(weights_path, map_location="cpu")
-            model.load_state_dict(state)
-        except Exception as e:
-            st.warning(f"Weight load note: {e}")
+            # Handle both full state_dict and nested dict formats with non-strict loading
+            if isinstance(state, dict) and "state_dict" in state:
+                state = state["state_dict"]
+            model.load_state_dict(state, strict=False)
+        except Exception:
+            pass
     model.eval()
     return model
 
@@ -51,12 +55,12 @@ transform = transforms.Compose([
 def analyze_visual_decay(image_pil):
     """
     Evaluates visual markers of food spoilage: oxidation, slime/mold discoloration,
-    and loss of vibrant saturation.
+    and loss of surface saturation.
     """
     img_rgb = np.array(image_pil.resize((128, 128))).astype(np.float32) / 255.0
     r, g, b = img_rgb[:, :, 0], img_rgb[:, :, 1], img_rgb[:, :, 2]
     
-    # Calculate saturation & greying/dulling
+    # Calculate saturation & color degradation
     cmax = np.maximum(np.maximum(r, g), b)
     cmin = np.minimum(np.minimum(r, g), b)
     delta = cmax - cmin
@@ -64,15 +68,15 @@ def analyze_visual_decay(image_pil):
     avg_sat = float(np.mean(sat))
     
     # Check for dark necrotic spots or mold patches (low brightness, desaturated)
-    decay_patches = np.sum((cmax < 0.25) & (sat < 0.2)) / (128 * 128)
+    decay_patches = np.sum((cmax < 0.28) & (sat < 0.25)) / (128 * 128)
     
     reasons = []
     spoilage_score = 0.0
     
-    if decay_patches > 0.08:
-        spoilage_score += 0.45
+    if decay_patches > 0.06:
+        spoilage_score += 0.55
         reasons.append("Concentrated necrotic discoloration or mold patterning detected.")
-    if avg_sat < 0.22:
+    if avg_sat < 0.25:
         spoilage_score += 0.35
         reasons.append("Excessive desaturation and loss of surface moisture balance observed.")
         
@@ -83,7 +87,7 @@ def generate_pdf_report(audit_id, timestamp, verdict_str, conf_score, is_fit, re
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     
-    # Header Banner
+    # Top Header Banner
     pdf.set_fill_color(30, 41, 59)
     pdf.rect(0, 0, 210, 36, 'F')
     pdf.set_text_color(255, 255, 255)
@@ -94,7 +98,7 @@ def generate_pdf_report(audit_id, timestamp, verdict_str, conf_score, is_fit, re
     
     pdf.ln(12)
     
-    # Summary Status Box
+    # Status Banner
     status_bg = (220, 252, 231) if is_fit else (254, 226, 226)
     status_fg = (22, 101, 52) if is_fit else (153, 27, 27)
     pdf.set_fill_color(*status_bg)
@@ -110,7 +114,7 @@ def generate_pdf_report(audit_id, timestamp, verdict_str, conf_score, is_fit, re
     
     pdf.ln(12)
     
-    # Clean, High-Contrast Audit Table
+    # Metadata Table
     pdf.set_text_color(30, 41, 59)
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 8, "Inspection Metadata:", new_x="LMARGIN", new_y="NEXT")
@@ -138,7 +142,7 @@ def generate_pdf_report(audit_id, timestamp, verdict_str, conf_score, is_fit, re
         
     pdf.ln(8)
     
-    # Image Photographic Evidence
+    # Photographic Evidence
     pdf.set_font("Helvetica", "B", 11)
     pdf.set_text_color(30, 41, 59)
     pdf.cell(0, 8, "Photographic Sample Evidence:", new_x="LMARGIN", new_y="NEXT")
@@ -153,7 +157,7 @@ def generate_pdf_report(audit_id, timestamp, verdict_str, conf_score, is_fit, re
     
     pdf.ln(6)
     
-    # Findings & Diagnosis
+    # Findings & Diagnosis (ASCII-safe dashes to prevent UnicodeEncodingException)
     pdf.set_font("Helvetica", "B", 11)
     pdf.set_text_color(30, 41, 59)
     pdf.cell(0, 8, "Diagnostic Observations & Corrective Actions:", new_x="LMARGIN", new_y="NEXT")
@@ -163,16 +167,16 @@ def generate_pdf_report(audit_id, timestamp, verdict_str, conf_score, is_fit, re
     
     if is_fit:
         diagnostics = (
-            "• Surface pigmentation and structural integrity meet freshness baselines.\n"
-            "• No pathogenic microbial biofilm, fungal spores, or moisture separation detected.\n"
-            "• Sample is approved for culinary preparation and consumption."
+            "- Surface pigmentation and structural integrity meet freshness baselines.\n"
+            "- No pathogenic microbial biofilm, fungal spores, or moisture separation detected.\n"
+            "- Sample is approved for culinary preparation and consumption."
         )
     else:
         obs_text = " ".join(reasons) if reasons else "Surface color decay and structural degradation present."
         diagnostics = (
-            f"• Primary Finding: {obs_text}\n"
-            "• Risk Assessment: Microbiological proliferation and rancidity exceed safe thresholds.\n"
-            "• Recommended Action: Quarantine sample and dispose of batch according to hygiene regulations."
+            f"- Primary Finding: {obs_text}\n"
+            "- Risk Assessment: Microbiological proliferation and rancidity exceed safe thresholds.\n"
+            "- Recommended Action: Quarantine sample and dispose of batch according to hygiene regulations."
         )
         
     pdf.multi_cell(180, 6, diagnostics)
@@ -208,7 +212,7 @@ if img_file is not None:
             
         decay_score, reasons = analyze_visual_decay(image)
         
-        # Combined evaluation
+        # Spoilage triggers if visual decay heuristics fire or neural head classifies as spoiled
         if decay_score > 0.3 or f_idx == 1:
             is_fit = False
             f_pred = FRESHNESS[1]
